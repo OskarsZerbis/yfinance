@@ -1,0 +1,150 @@
+name: Security Lab
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  issues: write
+
+jobs:
+  gitleaks:
+    name: Gitleaks - Secret Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add Gitleaks summary
+        if: always()
+        run: |
+          echo "## Gitleaks Secret Scan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Gitleaks checks the repository for hardcoded secrets such as API keys, passwords, and tokens." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Open the Gitleaks job logs above to see detailed results." >> $GITHUB_STEP_SUMMARY
+
+  trivy:
+    name: Trivy - Dependency and Filesystem Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy table report
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          format: table
+          output: trivy-report.txt
+          exit-code: 0
+
+      - name: Run Trivy SARIF report
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: 0
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Upload Trivy report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: |
+            trivy-report.txt
+            trivy-results.sarif
+
+      - name: Add Trivy summary
+        if: always()
+        run: |
+          echo "## Trivy Scan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Trivy scans the repository filesystem and dependencies for known vulnerabilities." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Reports generated:" >> $GITHUB_STEP_SUMMARY
+          echo "- trivy-report.txt as downloadable artifact" >> $GITHUB_STEP_SUMMARY
+          echo "- trivy-results.sarif uploaded to GitHub Security → Code scanning" >> $GITHUB_STEP_SUMMARY
+
+  zap:
+    name: OWASP ZAP - Local Web App Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create simple test web app
+        run: |
+          cat > app.py << 'EOF'
+          from flask import Flask, request
+
+          app = Flask(__name__)
+
+          @app.route("/")
+          def home():
+              ticker = request.args.get("ticker", "AAPL")
+              return f"""
+              <html>
+                <head>
+                  <title>Stock Monitor Lab</title>
+                </head>
+                <body>
+                  <h1>Stock Monitor Lab</h1>
+                  <p>Watching ticker: {ticker}</p>
+                </body>
+              </html>
+              """
+
+          if __name__ == "__main__":
+              app.run(host="0.0.0.0", port=8080)
+          EOF
+
+          cat > requirements-lab.txt << 'EOF'
+          flask
+          EOF
+
+      - name: Install and start app
+        run: |
+          pip install -r requirements-lab.txt
+          python app.py &
+          sleep 10
+
+      - name: Run OWASP ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: "http://localhost:8080"
+          fail_action: false
+          allow_issue_writing: false
+          artifact_name: zap-report
+
+      - name: Add ZAP summary
+        if: always()
+        run: |
+          echo "## OWASP ZAP Baseline Scan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ZAP scans the running local Flask app at http://localhost:8080." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Look for the downloadable ZAP report artifact in the workflow run." >> $GITHUB_STEP_SUMMARY
